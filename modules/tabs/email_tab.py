@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QMessageBox, QTableWidget, QTableWidgetItem,
     QProgressBar, QTextEdit, QComboBox, QGroupBox, QCheckBox
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QDate, QTimer
+from PyQt6.QtCore import pyqtSignal, Qt, QDate, QTimer, QThread
 import pandas as pd
 import re
 import json
@@ -11,12 +11,419 @@ import os
 import datetime
 import markdown
 from datetime import datetime
+import smtplib
 
 from modules.tabs.base_tab import BaseTab
 from modules.styles_fix import StyleManager, AppColors
 from modules.config_manager import ConfigManager
 from modules.data_processor import filter_users_by_category
 from modules.email_sender import send_email
+
+
+class EmailSenderThread(QThread):
+    """Thread para envio assíncrono de emails."""
+    
+    # Sinais para comunicação com a interface principal
+    progress_updated = pyqtSignal(int)  # Progresso atual
+    email_sent_signal = pyqtSignal(int, str, bool)  # índice, destinatario, sucesso
+    finished_signal = pyqtSignal(int, list)  # total_enviados, lista_erros
+    
+    def __init__(self, users, templates, config, parent=None):
+        super().__init__(parent)
+        self.users = users
+        self.templates = templates
+        self.config = config
+        self._is_running = True
+        self.delay_between_emails = 50  # 50ms entre emails (muito mais rápido)
+        
+    def run(self):
+        """Executa o envio dos emails em background."""
+        enviados = 0
+        erros = []
+        try:
+            servidor = smtplib.SMTP('smtp.gmail.com', 587)
+            servidor.starttls()
+            servidor.login(self.config['remetente'], self.config['senha'])
+            for i, user in enumerate(self.users):
+                if not self._is_running:
+                    break
+                try:
+                    email_content = self.process_template(user)
+                    assunto = self.config['assunto_padrao']
+                    destinatario = user['email']
+                    ok, msg = send_email(
+                        self.config['remetente'],
+                        self.config['senha'],
+                        destinatario,
+                        assunto,
+                        email_content,
+                        modo_teste=self.config['modo_teste'],
+                        destinatario_teste=self.config['destinatario_teste'],
+                        servidor=servidor
+                    )
+                    if ok:
+                        enviados += 1
+                        self.email_sent_signal.emit(i, destinatario, True)
+                    else:
+                        erros.append(f"Erro ao enviar para {destinatario}: {msg}")
+                        self.email_sent_signal.emit(i, destinatario, False)
+                    self.progress_updated.emit(i + 1)
+                    if self.delay_between_emails > 0:
+                        self.msleep(self.delay_between_emails)
+                except Exception as e:
+                    error_msg = f"Erro inesperado ao enviar para {user.get('email', 'email não encontrado')}: {str(e)}"
+                    erros.append(error_msg)
+                    self.email_sent_signal.emit(i, user.get('email', ''), False)
+                    self.progress_updated.emit(i + 1)
+            servidor.quit()
+        except Exception as e:
+            erros.append(f'Erro geral: {e}')
+        self.finished_signal.emit(enviados, erros)
+    
+    def stop(self):
+        """Para a execução da thread."""
+        self._is_running = False
+    
+    def process_template(self, user_data):
+        """Processa o template com os dados do usuário."""
+        category = self.get_user_category(user_data)
+        if not category or category not in self.templates:
+            return None
+
+        template = self.templates[category]
+
+        # Substituir nome (comum a todos os templates)
+        template = template.replace("{NOME}", user_data['nome'].upper())
+
+        # Formatação comum dependendo da categoria
+        if category in ['apenas_multa', 'multa_e_pendencia']:
+            # Substituir valor da multa
+            template = template.replace("{VALOR_MULTA}",
+                                    f"{user_data['valor_total_multas']:.2f}".replace('.', ','))
+
+        # Template para apenas multa
+        if category == 'apenas_multa':
+            livros_multa = self.format_multas_text(user_data['multas'])
+            template = self.replace_multa_placeholders(template, livros_multa)
+
+        # Template para apenas pendências
+        elif category == 'apenas_pendencia':
+            livros_pendentes = self.format_pendencias_text(user_data['pendencias'])
+            template = self.replace_pendencia_placeholders(template, livros_pendentes)
+
+        # Template para multas e pendências
+        elif category == 'multa_e_pendencia':
+            # Substituir informações de pendências
+            livros_pendentes = self.format_pendencias_text(user_data['pendencias'])
+            template = self.replace_pendencia_placeholders(template, livros_pendentes)
+
+            # Substituir informações de multas
+            livros_multa = self.format_multas_text(user_data['multas'])
+            template = self.replace_multa_placeholders(template, livros_multa)
+
+        # Garantir que as quebras de linha estão normalizadas antes da conversão
+        template = self.normalizar_quebras_de_linha(template)
+
+        # Converter Markdown para HTML
+        try:
+            # Usar a extensão nl2br (newline to <br>) para preservar quebras de linha
+            html_content = markdown.markdown(template, extensions=['nl2br'])
+
+            # Adicionar estilos CSS para melhorar a aparência do email
+            css_styles = """
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    line-height: 1.4;
+                    margin: 0;
+                    padding: 10px;
+                }
+                p { margin: 0 0 8px 0; }
+                ul { margin: 5px 0; padding-left: 20px; }
+                li { margin-bottom: 3px; }
+                strong { font-weight: bold; }
+                a { color: #0066cc; }
+                br { line-height: 1; }
+            </style>
+            """
+
+            # Garantir que o conteúdo HTML seja renderizado corretamente com espaçamento adequado
+            html_content = f"<html><head>{css_styles}</head><body>{html_content}</body></html>"
+
+            return html_content
+        except Exception as e:
+            print(f"Erro ao converter Markdown para HTML: {e}")
+            # Fallback para o template original - substituir todas as quebras de linha por <br>
+            return f"<html><body>{template.replace('\n', '<br>')}</body></html>"
+
+    def get_user_category(self, user_data):
+        """Determina a categoria do usuário para selecionar o template correto."""
+        if not user_data or 'multas' not in user_data or 'pendencias' not in user_data:
+            return None
+
+        has_multa = len(user_data['multas']) > 0
+        has_pendencia = len(user_data['pendencias']) > 0
+
+        if has_multa and has_pendencia:
+            return 'multa_e_pendencia'
+        elif has_multa:
+            return 'apenas_multa'
+        elif has_pendencia:
+            return 'apenas_pendencia'
+        return None
+
+    def normalizar_quebras_de_linha(self, texto):
+        """Normaliza as quebras de linha no texto para garantir compatibilidade."""
+        texto = texto.replace('\r\n', '\n')
+        texto = texto.replace('\r', '\n')
+        return texto
+
+    def format_multas_text(self, multas):
+        """Formata o texto das multas para o template."""
+        if not multas:
+            return "Nenhuma multa encontrada"
+
+        multas_text = []
+        for multa in multas:
+            titulo = multa.get('titulo', 'Item sem título')
+
+            # Verificação mais rigorosa da data de empréstimo
+            data_emp_raw = multa.get('data_emprestimo', '')
+            data_emp = 'Data não disponível'
+
+            if data_emp_raw and not pd.isna(data_emp_raw) and data_emp_raw != '':
+                data_emp = self.format_date(data_emp_raw)
+
+            # Verificação para data prevista
+            data_prev_raw = multa.get('data_prevista', '')
+            data_prev = 'Data não disponível'
+
+            if data_prev_raw and not pd.isna(data_prev_raw) and data_prev_raw != '':
+                data_prev = self.format_date(data_prev_raw)
+
+            # Verificação para data efetivada
+            data_efet_raw = multa.get('data_efetivada', '')
+            data_efet = 'Data não disponível'
+
+            if data_efet_raw and not pd.isna(data_efet_raw) and data_efet_raw != '':
+                data_efet = self.format_date(data_efet_raw)
+
+            # Se for uma chave e não tiver data efetivada, calcular a data efetivada baseada no valor da multa
+            eh_chave = multa.get('eh_chave', False) or 'Chave:' in titulo
+            if eh_chave and (not data_efet_raw or pd.isna(data_efet_raw) or data_efet_raw == ''):
+                try:
+                    # Se tiver data prevista, calcular a data efetivada
+                    if data_prev_raw and not pd.isna(data_prev_raw) and data_prev_raw != '':
+                        # Converter data prevista para objeto de data
+                        if isinstance(data_prev_raw, str):
+                            try:
+                                data_obj = datetime.strptime(data_prev_raw, "%d/%m/%Y")
+                            except ValueError:
+                                try:
+                                    data_obj = datetime.strptime(data_prev_raw, "%Y-%m-%d")
+                                except ValueError:
+                                    data_obj = None
+                        elif isinstance(data_prev_raw, datetime):
+                            data_obj = data_prev_raw
+                        else:
+                            data_obj = None
+
+                        # Se conseguiu converter, calcular a data efetivada
+                        if data_obj:
+                            valor_multa = int(multa.get('valor', 1))
+                            # Se o valor da multa for 1, adicionar 1 dia
+                            if valor_multa == 1:
+                                data_devolucao = data_obj + pd.Timedelta(days=1)
+                            else:
+                                data_devolucao = data_obj + pd.Timedelta(days=valor_multa)
+                            data_efet = data_devolucao.strftime("%d/%m/%Y")
+                except Exception as e:
+                    print(f"Erro ao calcular data efetivada: {e}")
+
+            # Calcular dias de atraso
+            dias_atraso = ''
+
+            # Caso seja uma chave, usar o valor da multa diretamente como dias de atraso
+            if eh_chave:
+                # Para chaves, usar o valor da multa como dias de atraso (R$ 1,00 por dia)
+                valor_multa = float(multa.get('valor', 0))
+                dias_atraso = str(int(valor_multa))
+            # Caso contrário, calcular normalmente pelos dias
+            elif data_prev_raw and data_efet_raw and data_efet != 'Data não disponível':
+                try:
+                    dias_atraso = str(self.calculate_days_difference(data_prev_raw, data_efet_raw))
+                except Exception as e:
+                    print(f"Erro ao calcular dias de atraso: {e}")
+
+            # Se ainda estiver vazio e temos as duas datas, tenta novamente com as strings formatadas
+            if dias_atraso == '' and data_prev != 'Data não disponível' and data_efet != 'Data não disponível':
+                try:
+                    dias_atraso = str(self.calculate_days_difference(data_prev, data_efet))
+                except Exception as e:
+                    print(f"Erro no segundo cálculo de dias de atraso: {e}")
+
+            # Se mesmo assim dias_atraso estiver vazio, calcular com as datas convertidas manualmente
+            if dias_atraso == '' and data_prev != 'Data não disponível' and data_efet != 'Data não disponível':
+                try:
+                    # Converter manualmente e garantir o formato correto
+                    data_prev_obj = None
+                    data_efet_obj = None
+
+                    # Tenta converter data_prev
+                    if isinstance(data_prev, str):
+                        try:
+                            data_prev_obj = datetime.strptime(data_prev, '%d/%m/%Y')
+                        except ValueError:
+                            pass
+
+                    # Tenta converter data_efet
+                    if isinstance(data_efet, str):
+                        try:
+                            data_efet_obj = datetime.strptime(data_efet, '%d/%m/%Y')
+                        except ValueError:
+                            pass
+
+                    # Se conseguiu converter ambas, calcula a diferença
+                    if data_prev_obj and data_efet_obj:
+                        delta = data_efet_obj - data_prev_obj
+                        dias_atraso = str(max(0, delta.days))
+                except Exception as e:
+                    print(f"Erro no terceiro cálculo de dias de atraso: {e}")
+
+            # Se ainda estiver vazio, verificar se existe o campo dias_atraso diretamente no dicionário
+            if dias_atraso == '':
+                dias_atraso = str(multa.get('dias_atraso', ''))
+
+            # Garantir que não fique vazio mesmo que falhe todo o resto
+            if dias_atraso == '':
+                # Tenta calcular os dias diretamente do valor da multa, considerando R$1,00 por dia
+                valor_multa = float(multa.get('valor', 0))
+                if valor_multa > 0:
+                    dias_atraso = str(int(valor_multa))  # Considerando R$1,00 por dia
+                else:
+                    dias_atraso = "0"  # Valor padrão se não conseguir calcular
+
+            # Montar o texto completo para este item no formato Markdown
+            item_text = (
+                f"**{titulo}**\n"
+                f"\t- Data de Empréstimo: {data_emp}\n"
+                f"\t- Data de Devolução Prevista: {data_prev}\n"
+                f"\t- Data de Devolução Efetiva: {data_efet}\n"
+                f"\t- Dias de Atraso: {dias_atraso}"
+            )
+            multas_text.append(item_text)
+
+        return "- " + "\n\n- ".join(multas_text)
+
+    def format_pendencias_text(self, pendencias):
+        """Formata o texto das pendências para o template."""
+        if not pendencias:
+            return "Nenhuma pendência encontrada"
+
+        pendencias_text = []
+        for pendencia in pendencias:
+            titulo = pendencia.get('titulo', 'Item sem título')
+
+            # Verificação mais rigorosa da data de empréstimo
+            data_emp_raw = pendencia.get('data_emprestimo', '')
+            data_emp = 'Data não disponível'
+
+            if data_emp_raw and not pd.isna(data_emp_raw) and data_emp_raw != '':
+                data_emp = self.format_date(data_emp_raw)
+
+            # Verificação similar para data prevista
+            data_prev_raw = pendencia.get('data_prevista', '')
+            data_prev = 'Data não disponível'
+
+            if data_prev_raw and not pd.isna(data_prev_raw) and data_prev_raw != '':
+                data_prev = self.format_date(data_prev_raw)
+
+            # Calcular dias de atraso até hoje
+            dias_atraso = ''
+            if data_prev_raw and not pd.isna(data_prev_raw) and data_prev_raw != '':
+                hoje = datetime.now()
+                dias_atraso = str(self.calculate_days_difference(data_prev_raw, hoje))
+
+            # Montar o texto completo para este item no formato Markdown
+            item_text = (
+                f"**{titulo}**\n"
+                f"\t- Data de Empréstimo: {data_emp}\n"
+                f"\t- Data de Devolução Prevista: {data_prev}\n"
+                f"\t- Dias de Atraso: {dias_atraso}"
+            )
+            pendencias_text.append(item_text)
+
+        return "- " + "\n\n- ".join(pendencias_text)
+
+    def replace_multa_placeholders(self, template, livros_multa):
+        """Substitui os placeholders relacionados a multas no template."""
+        template = template.replace("{LIVROS_MULTA}", livros_multa)
+        template = template.replace("    - Data de Empréstimo: {DATA_EMPRESTIMO}", "")
+        template = template.replace("    - Data de Devolução Prevista: {DATA_PREVISTA}", "")
+        template = template.replace("    - Data de Devolução Efetiva: {DATA_EFETIVA}", "")
+        template = template.replace("    - Dias de Atraso: {DIAS_ATRASO}", "")
+        return template
+
+    def replace_pendencia_placeholders(self, template, livros_pendentes):
+        """Substitui os placeholders relacionados a pendências no template."""
+        template = template.replace("{LIVROS_PENDENTES}", livros_pendentes)
+        template = template.replace("    - Data de Empréstimo: {DATA_EMPRESTIMO}", "")
+        template = template.replace("    - Data de Devolução Prevista: {DATA_PREVISTA}", "")
+        template = template.replace("    - Dias de Atraso: {DIAS_ATRASO}", "")
+        return template
+
+    def format_date(self, date_value):
+        """Formata uma data para o padrão DD/MM/YYYY."""
+        if isinstance(date_value, pd.Timestamp):
+            return date_value.strftime('%d/%m/%Y')
+        elif isinstance(date_value, datetime) or isinstance(date_value, QDate):
+            return date_value.strftime('%d/%m/%Y')
+        elif isinstance(date_value, str):
+            try:
+                date_obj = datetime.strptime(date_value, '%Y-%m-%d')
+                return date_obj.strftime('%d/%m/%Y')
+            except ValueError:
+                try:
+                    date_obj = datetime.strptime(date_value, '%d/%m/%Y')
+                    return date_value
+                except ValueError:
+                    return date_value
+        return str(date_value)
+
+    def calculate_days_difference(self, date1, date2):
+        """Calcula a diferença em dias entre duas datas."""
+        if isinstance(date1, str):
+            try:
+                date1 = datetime.strptime(date1, '%d/%m/%Y')
+            except ValueError:
+                try:
+                    date1 = datetime.strptime(date1, '%Y-%m-%d')
+                except ValueError:
+                    return 0
+
+        if isinstance(date2, str):
+            try:
+                date2 = datetime.strptime(date2, '%d/%m/%Y')
+            except ValueError:
+                try:
+                    date2 = datetime.strptime(date2, '%Y-%m-%d')
+                except ValueError:
+                    return 0
+
+        if not isinstance(date1, datetime):
+            if hasattr(date1, 'to_pydatetime'):
+                date1 = date1.to_pydatetime()
+            else:
+                return 0
+
+        if not isinstance(date2, datetime):
+            if hasattr(date2, 'to_pydatetime'):
+                date2 = date2.to_pydatetime()
+            else:
+                return 0
+
+        delta = date2 - date1
+        return max(0, delta.days)
 
 
 class EmailTab(BaseTab):
@@ -36,11 +443,7 @@ class EmailTab(BaseTab):
         
         # Variáveis para controle de envio em lote
         self.selected_users = []
-        self.current_email_index = 0
-        self.enviados = 0
-        self.erros = []
-        self.email_timer = QTimer()
-        self.email_timer.timeout.connect(self.send_next_email)
+        self.email_thread = None  # Thread para envio de emails
         
         super().__init__(parent)
         self.load_templates()
@@ -380,7 +783,6 @@ class EmailTab(BaseTab):
         # Converter Markdown para HTML
         try:
             # Usar a extensão nl2br (newline to <br>) para preservar quebras de linha
-            # Isso converte quebras de linha simples em <br> no HTML resultante
             html_content = markdown.markdown(template, extensions=['nl2br'])
 
             # Adicionar estilos CSS para melhorar a aparência do email
@@ -412,14 +814,8 @@ class EmailTab(BaseTab):
 
     def normalizar_quebras_de_linha(self, texto):
         """Normaliza as quebras de linha no texto para garantir compatibilidade."""
-        # Primeiro substituir CRLF (\r\n) por LF (\n)
         texto = texto.replace('\r\n', '\n')
-        # Depois substituir CR (\r) sozinhos por LF (\n)
         texto = texto.replace('\r', '\n')
-
-        # Remover a conversão especial que estava causando espaçamento excessivo
-        # texto = texto.replace('\n\n', '\n<br>\n')
-
         return texto
 
     def format_multas_text(self, multas):
@@ -601,31 +997,19 @@ class EmailTab(BaseTab):
 
     def replace_multa_placeholders(self, template, livros_multa):
         """Substitui os placeholders relacionados a multas no template."""
-        # Substituir a lista completa de multas no template
-        # Como agora já formatamos todas as informações no método format_multas_text,
-        # não precisamos mais substituir os placeholders individuais de DATA_EMPRESTIMO, etc.
         template = template.replace("{LIVROS_MULTA}", livros_multa)
-
-        # Remover qualquer placeholder de multa restante
         template = template.replace("    - Data de Empréstimo: {DATA_EMPRESTIMO}", "")
         template = template.replace("    - Data de Devolução Prevista: {DATA_PREVISTA}", "")
         template = template.replace("    - Data de Devolução Efetiva: {DATA_EFETIVA}", "")
         template = template.replace("    - Dias de Atraso: {DIAS_ATRASO}", "")
-
         return template
 
     def replace_pendencia_placeholders(self, template, livros_pendentes):
         """Substitui os placeholders relacionados a pendências no template."""
-        # Substituir a lista completa de pendências no template
-        # Como agora já formatamos todas as informações no método format_pendencias_text,
-        # não precisamos mais substituir os placeholders individuais de DATA_EMPRESTIMO, etc.
         template = template.replace("{LIVROS_PENDENTES}", livros_pendentes)
-
-        # Remover qualquer placeholder de pendência restante
         template = template.replace("    - Data de Empréstimo: {DATA_EMPRESTIMO}", "")
         template = template.replace("    - Data de Devolução Prevista: {DATA_PREVISTA}", "")
         template = template.replace("    - Dias de Atraso: {DIAS_ATRASO}", "")
-
         return template
 
     def format_date(self, date_value):
@@ -635,21 +1019,19 @@ class EmailTab(BaseTab):
         elif isinstance(date_value, datetime) or isinstance(date_value, QDate):
             return date_value.strftime('%d/%m/%Y')
         elif isinstance(date_value, str):
-            # Tentar converter string para data e depois formatar
             try:
                 date_obj = datetime.strptime(date_value, '%Y-%m-%d')
                 return date_obj.strftime('%d/%m/%Y')
             except ValueError:
                 try:
                     date_obj = datetime.strptime(date_value, '%d/%m/%Y')
-                    return date_value  # Já está no formato correto
+                    return date_value
                 except ValueError:
-                    return date_value  # Retornar como está se não conseguir converter
-        return str(date_value)  # Fallback para qualquer outro caso
+                    return date_value
+        return str(date_value)
 
     def calculate_days_difference(self, date1, date2):
         """Calcula a diferença em dias entre duas datas."""
-        # Converter para objetos datetime
         if isinstance(date1, str):
             try:
                 date1 = datetime.strptime(date1, '%d/%m/%Y')
@@ -668,7 +1050,6 @@ class EmailTab(BaseTab):
                 except ValueError:
                     return 0
 
-        # Garantir que são objetos datetime
         if not isinstance(date1, datetime):
             if hasattr(date1, 'to_pydatetime'):
                 date1 = date1.to_pydatetime()
@@ -681,9 +1062,8 @@ class EmailTab(BaseTab):
             else:
                 return 0
 
-        # Calcular diferença
         delta = date2 - date1
-        return max(0, delta.days)  # Garantir que não seja negativo
+        return max(0, delta.days)
 
     def generate_preview(self):
         """Gera um preview do email para o usuário selecionado."""
@@ -867,76 +1247,49 @@ class EmailTab(BaseTab):
         if confirm == QMessageBox.StandardButton.No:
             return
 
-        # Inicializar variáveis de controle
-        self.current_email_index = 0
-        self.enviados = 0
-        self.erros = []
+        # Criar e configurar a thread de envio
+        self.email_thread = EmailSenderThread(self.selected_users, self.templates, {
+            'remetente': remetente,
+            'senha': senha,
+            'destinatario_teste': destinatario_teste,
+            'assunto_padrao': assunto_padrao,
+            'modo_teste': modo_teste
+        }, self)
+        
+        # Conectar sinais da thread
+        self.email_thread.progress_updated.connect(self.update_progress)
+        self.email_thread.email_sent_signal.connect(self.on_email_sent)
+        self.email_thread.finished_signal.connect(self.on_email_finished)
         
         # Configurar barra de progresso
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.progress_bar.setMaximum(len(self.selected_users))
         
-        # Armazenar configurações para uso no timer
-        self.remetente = remetente
-        self.senha = senha
-        self.destinatario_teste = destinatario_teste
-        self.assunto_padrao = assunto_padrao
-        self.modo_teste = modo_teste
-        
         # Desabilitar botões durante o envio
         self.send_button.setEnabled(False)
         self.test_button.setEnabled(False)
         self.preview_button.setEnabled(False)
         
-        # Iniciar o envio do primeiro email
-        self.send_next_email()
+        # Iniciar a thread
+        self.email_thread.start()
 
-    def send_next_email(self):
-        """Envia o próximo email da lista com delay."""
-        if self.current_email_index >= len(self.selected_users):
-            # Finalizar envio
-            self.finish_email_sending()
-            return
-            
-        user = self.selected_users[self.current_email_index]
-        email_content = self.process_template(user)
-        assunto = self.assunto_padrao
-        destinatario = user['email']
-        
-        # Enviar email
-        ok, msg = send_email(
-            self.remetente, 
-            self.senha, 
-            destinatario, 
-            assunto, 
-            email_content, 
-            modo_teste=self.modo_teste, 
-            destinatario_teste=self.destinatario_teste
-        )
-        
-        if ok:
-            self.enviados += 1
-        else:
-            self.erros.append(msg)
-        
-        # Atualizar progresso
-        self.progress_bar.setValue(self.current_email_index + 1)
-        
-        # Próximo email
-        self.current_email_index += 1
-        
-        # Agendar próximo envio com delay de 0,5 segundos
-        if self.current_email_index < len(self.selected_users):
-            self.email_timer.start(500)  # 0,5 segundos de delay
-        else:
-            # Último email enviado, finalizar
-            self.finish_email_sending()
+    def update_progress(self, value):
+        """Atualiza a barra de progresso."""
+        self.progress_bar.setValue(value)
 
-    def finish_email_sending(self):
-        """Finaliza o processo de envio de emails."""
-        # Parar timer
-        self.email_timer.stop()
+    def on_email_sent(self, index, destinatario, success):
+        """Chamado quando um email é enviado (sucesso ou erro)."""
+        # Aqui você pode adicionar logs ou atualizações em tempo real se desejar
+        pass
+
+    def on_email_finished(self, total_enviados, erros):
+        """Chamado quando todos os emails foram processados."""
+        # Parar a thread
+        if self.email_thread:
+            self.email_thread.stop()
+            self.email_thread.wait()  # Aguardar a thread terminar
+            self.email_thread = None
         
         # Reabilitar botões
         self.send_button.setEnabled(True)
@@ -947,21 +1300,23 @@ class EmailTab(BaseTab):
         self.progress_bar.setVisible(False)
         
         # Mostrar resumo
-        resumo = f"Foram enviados {self.enviados} emails."
-        if self.modo_teste:
+        resumo = f"Foram enviados {total_enviados} emails."
+        if self.config_manager.get_value('modo_teste', True):
             resumo += " (Modo de Teste)"
 
-        if self.erros:
-            resumo += f"\n\nOcorreram erros em {len(self.erros)} envios:\n" + "\n".join(self.erros)
+        if erros:
+            resumo += f"\n\nOcorreram erros em {len(erros)} envios:\n" + "\n".join(erros[:5])  # Mostrar apenas os primeiros 5 erros
+            if len(erros) > 5:
+                resumo += f"\n... e mais {len(erros) - 5} erros."
         
         self.show_message_box(
             "Envio de Emails Concluído",
             resumo,
-            QMessageBox.Icon.Information if self.enviados else QMessageBox.Icon.Warning
+            QMessageBox.Icon.Information if total_enviados > 0 else QMessageBox.Icon.Warning
         )
         
         # Emitir sinal
-        self.email_sent.emit(self.enviados)
+        self.email_sent.emit(total_enviados)
 
     def test_send_email(self):
         """Envia um e-mail de teste para o destinatário de teste."""
