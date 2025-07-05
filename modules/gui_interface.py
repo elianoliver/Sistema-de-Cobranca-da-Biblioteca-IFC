@@ -199,6 +199,10 @@ class ExcelInterface(QMainWindow):
         # Não mostrar mais a barra de progresso ao trocar de aba
         self.progress_bar.setVisible(False)
         self.progress_bar.setValue(0)
+        
+        # Atualizar a aba de configuração quando ela for selecionada
+        if hasattr(self, 'config_tab') and index == 4:  # Índice 4 = aba de configurações
+            self.config_tab.update_data()
 
     def handle_files_loaded(self, multas_df, pendencias_df, multas_file, pendencias_file):
         """Manipula o evento quando os arquivos são carregados na aba de importação"""
@@ -349,11 +353,16 @@ class ExcelInterface(QMainWindow):
     def handle_config_updated(self):
         """Manipula o evento quando as configurações são atualizadas."""
         print("Configurações atualizadas.")
-        # Se alguma aba precisar ser atualizada, podemos fazer aqui.
-        # Por exemplo, a aba de email pode precisar recarregar as configs.
+        
+        # Recarregar configurações na aba de email
         if hasattr(self, 'email_tab'):
-            # A EmailTab já busca as configs na hora do envio, mas se precisasse
-            # de um reload, seria aqui.
+            # Recarregar todas as configurações de email
+            self.email_tab.reload_config()
+            print("Configurações atualizadas na aba de email.")
+        
+        # Recarregar configurações na aba de templates (caso necessário)
+        if hasattr(self, 'template_tab'):
+            # A aba de templates já carrega as configs automaticamente
             pass
 
 def main():

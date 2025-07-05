@@ -3,6 +3,9 @@
 teste2.py
 *.xlsx
 *.json
+teste_dias_atraso.py
+teste_dias_atraso_chave.py
+consultas sql.txt
 
 # ============ TEMPLATE GITIGNORE PYTHON ================
 

@@ -590,6 +590,38 @@ class EmailTab(BaseTab):
         except Exception as e:
             self.show_message_box("Erro", f"Erro ao carregar templates: {str(e)}", QMessageBox.Icon.Critical)
 
+    def reload_config(self):
+        """Recarrega as configurações de email do arquivo de configuração."""
+        try:
+            # Recarregar templates
+            self.load_templates()
+            
+            # Forçar recarga das configurações de email
+            # Usar o método reload_config do ConfigManager
+            self.config_manager.reload_config()
+            
+            # Limpar preview atual
+            if hasattr(self, 'email_preview'):
+                self.email_preview.clear()
+                if hasattr(self, 'preview_info_label'):
+                    self.preview_info_label.setText("")
+            
+            # Log para debug - verificar se as configurações foram recarregadas
+            destinatario_teste_raw = self.config_manager.get_value('email_destinatario_padrao', '')
+            remetente = self.config_manager.get_value('email_remetente', '')
+            destinatario_teste = destinatario_teste_raw if destinatario_teste_raw.strip() else remetente
+            modo_teste = self.config_manager.get_value('modo_teste', True)
+            print(f"Configurações recarregadas - Destinatário de teste: {destinatario_teste}, Modo teste: {modo_teste}")
+            
+            # Log específico para verificar o campo email_destinatario_padrao
+            print(f"  - email_destinatario_padrao (raw): '{destinatario_teste_raw}'")
+            print(f"  - email_destinatario_padrao (com fallback): '{destinatario_teste}'")
+            print(f"  - Usando fallback: {destinatario_teste_raw.strip() == ''}")
+            
+            print("Configurações de email recarregadas com sucesso.")
+        except Exception as e:
+            print(f"Erro ao recarregar configurações: {e}")
+
     def update_data(self, unified_data=None):
         """Atualiza os dados exibidos na aba."""
         if unified_data is not None:
@@ -1195,9 +1227,25 @@ class EmailTab(BaseTab):
         # Configurações de e-mail
         remetente = self.config_manager.get_value('email_remetente', '')
         senha = self.config_manager.get_value('email_senha_app', '')
-        destinatario_teste = self.config_manager.get_value('email_destinatario_padrao', remetente)
+        
+        # Carregar destinatário de teste - se estiver vazio, usar o remetente como fallback
+        destinatario_teste_raw = self.config_manager.get_value('email_destinatario_padrao', '')
+        destinatario_teste = destinatario_teste_raw if destinatario_teste_raw.strip() else remetente
+        
         assunto_padrao = self.config_manager.get_value('email_assunto_padrao', 'Notificação da Biblioteca')
         modo_teste = self.config_manager.get_value('modo_teste', True)
+
+        # Log para debug - verificar quais valores estão sendo carregados
+        print(f"DEBUG - Configurações carregadas no send_emails:")
+        print(f"  - Remetente: {remetente}")
+        print(f"  - Destinatário de teste: {destinatario_teste}")
+        print(f"  - Modo teste: {modo_teste}")
+        print(f"  - Assunto padrão: {assunto_padrao}")
+        
+        # Log específico para verificar o campo email_destinatario_padrao
+        print(f"  - email_destinatario_padrao (raw): '{destinatario_teste_raw}'")
+        print(f"  - email_destinatario_padrao (com fallback): '{destinatario_teste}'")
+        print(f"  - Usando fallback: {destinatario_teste_raw.strip() == ''}")
 
         if not remetente or not senha:
             self.show_message_box(
@@ -1322,9 +1370,23 @@ class EmailTab(BaseTab):
         """Envia um e-mail de teste para o destinatário de teste."""
         remetente = self.config_manager.get_value('email_remetente', '')
         senha = self.config_manager.get_value('email_senha_app', '')
-        destinatario_teste = self.config_manager.get_value('email_destinatario_padrao', remetente)
+        
+        # Carregar destinatário de teste - se estiver vazio, usar o remetente como fallback
+        destinatario_teste_raw = self.config_manager.get_value('email_destinatario_padrao', '')
+        destinatario_teste = destinatario_teste_raw if destinatario_teste_raw.strip() else remetente
+        
         assunto = "Teste de Email do Sistema Biblioteca"
         corpo = "<b>Este é um teste de envio de e-mail do sistema Biblioteca.</b><br>Se você recebeu este e-mail, a configuração está correta."
+        
+        # Log para debug - verificar quais valores estão sendo carregados
+        print(f"DEBUG - Configurações carregadas no test_send_email:")
+        print(f"  - Remetente: {remetente}")
+        print(f"  - Destinatário de teste: {destinatario_teste}")
+        
+        # Log específico para verificar o campo email_destinatario_padrao
+        print(f"  - email_destinatario_padrao (raw): '{destinatario_teste_raw}'")
+        print(f"  - email_destinatario_padrao (com fallback): '{destinatario_teste}'")
+
         if not remetente or not senha:
             self.show_message_box(
                 "Configuração de Email",

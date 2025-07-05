@@ -45,6 +45,10 @@ class ConfigManager:
         self.config[key] = value
         self._save_config()
 
+    def reload_config(self):
+        """Força a recarga das configurações do arquivo"""
+        self.config = self._load_config()
+
     def _create_default_config(self):
         """Cria uma configuração padrão"""
         default_config = {

@@ -88,11 +88,22 @@ class ConfigTab(BaseTab):
     def save_config(self):
         """Salva as configurações a partir dos campos."""
         try:
+            # Log para debug - verificar os valores antes de salvar
+            print(f"DEBUG - Salvando configurações:")
+            print(f"  - email_remetente: '{self.email_remetente_input.text()}'")
+            print(f"  - email_destinatario_padrao: '{self.email_destinatario_padrao_input.text()}'")
+            print(f"  - email_assunto_padrao: '{self.email_assunto_padrao_input.text()}'")
+            print(f"  - modo_teste: {self.modo_teste_check.isChecked()}")
+            
             self.config_manager.set_value('email_remetente', self.email_remetente_input.text())
             self.config_manager.set_value('email_senha_app', self.email_senha_app_input.text())
             self.config_manager.set_value('email_destinatario_padrao', self.email_destinatario_padrao_input.text())
             self.config_manager.set_value('email_assunto_padrao', self.email_assunto_padrao_input.text())
             self.config_manager.set_value('modo_teste', self.modo_teste_check.isChecked())
+
+            # Log para debug - verificar se foi salvo corretamente
+            print(f"DEBUG - Configurações salvas. Verificando:")
+            print(f"  - email_destinatario_padrao (após salvar): '{self.config_manager.get_value('email_destinatario_padrao', '')}'")
 
             self.config_updated.emit()
             self.show_message_box("Sucesso", "Configurações salvas com sucesso!")
@@ -101,4 +112,12 @@ class ConfigTab(BaseTab):
 
     def update_data(self, *args, **kwargs):
         """Recarrega as configurações quando a aba é selecionada, se necessário."""
-        self.load_config() 
+        self.load_config()
+        
+        # Forçar atualização dos campos para garantir que estão sincronizados
+        if hasattr(self, 'email_remetente_input'):
+            self.email_remetente_input.setText(self.config_manager.get_value('email_remetente', ''))
+            self.email_senha_app_input.setText(self.config_manager.get_value('email_senha_app', ''))
+            self.email_destinatario_padrao_input.setText(self.config_manager.get_value('email_destinatario_padrao', ''))
+            self.email_assunto_padrao_input.setText(self.config_manager.get_value('email_assunto_padrao', ''))
+            self.modo_teste_check.setChecked(self.config_manager.get_value('modo_teste', True)) 
