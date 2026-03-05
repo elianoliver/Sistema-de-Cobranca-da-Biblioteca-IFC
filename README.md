@@ -461,6 +461,4 @@ Para contribuir com melhorias:
 
 **Desenvolvido com ❤️ como Projeto de Conclusão de Curso**
 
-Demonstrando excelência técnica, inovação e impacto prático
-
 </div>
